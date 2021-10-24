@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -20,17 +21,35 @@ var start time.Time
 var rosterPath string
 var requests uint
 var appErrors uint
+var GuildName string
+var ServerName string
 
-const GuildName = "Vets of Norrath"
+// const GuildName = "Vets of Norrath"
 const Port = ":8080"
+const LogPath = "rosterService.log"
+const DumpPath = "./"
 
 func main() {
+	f, err := os.OpenFile(LogPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+	defer f.Close()
+
+	log.SetOutput(f)
+	log.SetFlags(log.Lshortfile | log.Ldate | log.Ltime | log.LUTC | log.Lmsgprefix)
+
 	start = time.Now()
-	rosterPath = "Vets of Norrath_aradune-20211016-165944.txt"
-	err := guild.LoadFromPath(rosterPath, nil)
+	rosterPath, err = findDump(DumpPath)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+	GuildName, ServerName = decodeDump(rosterPath)
+	err = guild.LoadFromPath(rosterPath, log.Default())
 	if err != nil {
 		panic(err)
 	}
+
 	// todo: middleware for logging request count
 	r := gin.Default()
 	r.POST("/upload", dumpHandler)
@@ -39,7 +58,36 @@ func main() {
 	r.GET("/class/:class", classHandler)
 	r.GET("/guild", guildHandler)
 	r.GET("/health", healthHandler)
+	r.GET("/logs", logHandler)
+	r.GET("/guildname", guildNameHandler)
+	r.GET("/servername", serverNameHandler)
 	r.Run(Port)
+}
+
+func findDump(path string) (string, error) {
+	var files []string
+
+	err := filepath.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
+		if strings.HasSuffix(d.Name(), ".txt") {
+			files = append(files, d.Name())
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(files) <= 0 {
+		return "", errors.New("cannot find a recent guild dump")
+	}
+	return files[len(files)-1], nil // return last file - should be latest
+}
+
+func decodeDump(dumpname string) (guildname string, servername string) {
+	dump := strings.Split(dumpname, "_")
+	guildname = dump[0]
+	dumpy := strings.Split(dump[1], "-")
+	servername = dumpy[0]
+	return guildname, servername
 }
 
 func healthHandler(c *gin.Context) {
@@ -59,6 +107,20 @@ func healthHandler(c *gin.Context) {
 		"rosterCount":     fmt.Sprintf("%d", len(guild.Members)),
 		"rosterFileSize":  fmt.Sprintf("%d", fi.Size()),
 		"errors":          appErrors,
+		"guild":           GuildName,
+		"server":          ServerName,
+	})
+}
+
+func serverNameHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"server": ServerName,
+	})
+}
+
+func guildNameHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"guild": GuildName,
 	})
 }
 
@@ -69,6 +131,7 @@ func charHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": "Player not found",
 		})
+		log.Printf("%s not found, requested by %s - %s", c.Param("character"), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -82,6 +145,7 @@ func mainHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": "Player not found",
 		})
+		log.Printf("%s not found, requested by %s - %s", c.Param("character"), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -90,6 +154,7 @@ func mainHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": err.Error(),
 		})
+		log.Printf("%s, requested by %s - %s", err.Error(), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -104,6 +169,7 @@ func classHandler(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": "No players for provided class",
 		})
+		log.Printf("%s has no players, requested by %s - %s", c.Param("class"), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -147,6 +213,7 @@ func dumpHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "missing file",
 		})
+		log.Printf("%s file not found, requested by %s - %s", c.Param("file"), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -159,6 +226,7 @@ func dumpHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "invalid guild format",
 		})
+		log.Printf("%s invalid guild format, requested by %s - %s", filename, c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -167,6 +235,7 @@ func dumpHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
 		})
+		log.Printf("%s :: creating tmp dir, requested by %s - %s", err.Error(), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -180,6 +249,7 @@ func dumpHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
 		})
+		log.Printf("%s :: loading guild, requested by %s - %s", err.Error(), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -189,6 +259,7 @@ func dumpHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
 		})
+		log.Printf("%s :: writing guild, requested by %s - %s", err.Error(), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -197,6 +268,7 @@ func dumpHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": err.Error(),
 		})
+		log.Printf("%s :: removing guild, requested by %s - %s", err.Error(), c.ClientIP(), c.Request.UserAgent())
 		appErrors++
 		return
 	}
@@ -209,4 +281,17 @@ func dumpHandler(c *gin.Context) {
 // return all guild members
 func guildHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, guild.Members)
+}
+
+func logHandler(c *gin.Context) {
+	f, err := os.ReadFile(LogPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		log.Printf("%s :: reading log, requested by %s - %s", err.Error(), c.ClientIP(), c.Request.UserAgent())
+		appErrors++
+		return
+	}
+	c.String(http.StatusOK, string(f))
 }
